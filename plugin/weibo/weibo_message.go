@@ -1,37 +1,43 @@
 package weibo
 
 import (
-	"context"
+	"fmt"
 	ctrl "github.com/FloatTech/zbpctrl"
 	"github.com/FloatTech/zbputils/control"
 	"github.com/tidwall/gjson"
 	zero "github.com/wdvxdr1123/ZeroBot"
 	"github.com/wdvxdr1123/ZeroBot/message"
 	"io"
-	"io/ioutil"
 	"net/http"
 	"regexp"
 	"strings"
 	"time"
 )
 
+type channelItem struct {
+	ChannelKey string `json:"bytes"`
+	TestUrl    string `json:"testApi"`
+	ContUri    string `json:"contApi"`
+}
+
 var (
-	testApi = "https://m.weibo.cn/api/container/getIndex?containerid=100505"
-	contApi = "https://m.weibo.cn/api/container/getIndex?containerid=107603"
+	testApi         = "https://m.weibo.cn/api/container/getIndex?containerid=100505"
+	contApi         = "https://m.weibo.cn/api/container/getIndex?containerid=107603"
+	channelItemData []*channelItem
 )
 
 func TrimHtml(src string) string {
 	//将HTML标签全转换成小写
-	re, _ := regexp.Compile("\\<[\\S\\s]+?\\>")
+	re, _ := regexp.Compile("<[\\S\\s]+?>")
 	src = re.ReplaceAllStringFunc(src, strings.ToLower)
 	//去除STYLE
-	re, _ = regexp.Compile("\\<style[\\S\\s]+?\\</style\\>")
+	re, _ = regexp.Compile("<style[\\S\\s]+?</style>")
 	src = re.ReplaceAllString(src, "")
 	//去除SCRIPT
-	re, _ = regexp.Compile("\\<script[\\S\\s]+?\\</script\\>")
+	re, _ = regexp.Compile("<script[\\S\\s]+?</script>")
 	src = re.ReplaceAllString(src, "")
 	//去除所有尖括号内的HTML代码，并换成换行符
-	re, _ = regexp.Compile("\\<[\\S\\s]+?\\>")
+	re, _ = regexp.Compile("<[\\S\\s]+?>")
 	src = re.ReplaceAllString(src, "\n")
 	//去除连续的换行符
 	re, _ = regexp.Compile("\\s{2,}")
@@ -51,7 +57,7 @@ func getRequest(url string) string {
 			panic(err)
 		}
 	}(resp.Body)
-	result, _ := ioutil.ReadAll(resp.Body)
+	result, _ := io.ReadAll(resp.Body)
 	return string(result)
 }
 
@@ -67,7 +73,7 @@ func getImageByUrl(url string) []byte {
 	resp, err := http.Get(url)
 	if err != nil {
 	}
-	body, _ := ioutil.ReadAll(resp.Body)
+	body, _ := io.ReadAll(resp.Body)
 	defer resp.Body.Close()
 	return body
 }
@@ -77,48 +83,72 @@ func init() {
 		DisableOnDefault: false,
 		Help:             "--help weibo Message",
 	})
-	cntX, cancel := context.WithCancel(context.Background())
 	engine.OnPrefix("订阅").SetBlock(true).Handle(func(ctx *zero.Ctx) {
 		args := ctx.State["args"].(string)
-		url := testApi + args
-		contUrl := contApi + args
-		go func(url string) {
-			conn := getRequest(url)
-			value := gjson.Get(conn, "data.userInfo.screen_name")
+		ch := getChannels(args)
+		for _, item := range ch {
+			linkMsg := getWeiboLink(item.TestUrl)
 			ctx.Send(message.Message{
-				message.Text("已经成功订阅  :", value),
+				message.Text(linkMsg),
 			})
-			go func() {
-				timeTicker := time.NewTicker(10 * time.Second)
-				var tmpId string
-				for {
-					select {
-					case <-timeTicker.C:
-						profileId, msgText, msgPic := getWeiboMessageBox(contUrl)
-						if tmpId != profileId {
-							ctx.Send(message.Message{
-								message.Text(value.String() + ":\n" + TrimHtml(msgText)),
-							})
-							for _, picUrl := range msgPic {
-								ctx.Send(message.Message{
-									message.ImageBytes(getImageByUrl(picUrl.String())),
-								})
-							}
-							tmpId = profileId
-						}
-					case <-cntX.Done():
+		}
+		ticker := time.NewTicker(60 * time.Second)
+		for range ticker.C {
+			var tmpId string
+			for _, item := range ch {
+				profileId, msgText, msgPic := getWeiboMessageBox(item.ContUri)
+				if tmpId != profileId {
+					ctx.Send(message.Message{
+						message.Text(":\n" + TrimHtml(msgText)),
+					})
+					for _, picUrl := range msgPic {
 						ctx.Send(message.Message{
-							message.Text("取消订阅：" + value.String() + "，成功"),
+							message.ImageBytes(getImageByUrl(picUrl.String())),
 						})
-						return
 					}
+					tmpId = profileId
 				}
-			}()
-		}(url)
+			}
+		}
 	})
-	engine.OnFullMatch("取消", zero.OnlyGroup).SetBlock(true).Handle(func(ctx *zero.Ctx) {
-		cancel()
-	})
+}
+
+func getWeiboLink(url string) string {
+	conn := getRequest(url)
+	value := gjson.Get(conn, "data.userInfo.screen_name")
+	return "已经成功订阅  :" + value.String()
+}
+
+func getChannels(args ...string) []*channelItem {
+	for _, item := range args {
+		channelItemData = append(channelItemData, &channelItem{
+			ChannelKey: item,
+			TestUrl:    testApi + item,
+			ContUri:    contApi + item,
+		})
+	}
+	return channelItemData
+}
+
+func delChannels(arg string) []*channelItem {
+	r := channelItemData
+	for i, item := range r {
+		if item.ChannelKey == arg {
+			r = append(r[:i], r[i+1:]...)
+		}
+	}
+	return r
+}
+
+func running() {
+	r := channelItemData
+	ticker := time.NewTicker(60 * time.Second)
+	for range ticker.C {
+		for _, item := range r {
+			linkMsg := getWeiboLink(item.TestUrl)
+			fmt.Println(linkMsg)
+		}
+	}
 }
 
 // Send 快捷发送
