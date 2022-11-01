@@ -66,14 +66,25 @@ func getRequest(url string) string {
 	return string(result)
 }
 
-func getWeiboMessageBox(url string) (string, string, []gjson.Result, string, string) {
+func getWeiboMessageBox(url string) (string, string, []gjson.Result, string, string, string) {
+	// 有个问题 需要排除置顶微博
 	cont := getRequest(url)
-	profileId := gjson.Get(cont, "data.cards.0.profile_type_id").String()
-	msgText := gjson.Get(cont, "data.cards.0.mblog.text").String()
-	msgPic := gjson.Get(cont, "data.cards.0.mblog.pics.#.url").Array()
-	scheme := gjson.Get(cont, "data.cards.0.scheme").String()
-	username := gjson.Get(cont, "data.cards.0.mblog.user.screen_name").String()
-	return profileId, msgText, msgPic, scheme, username
+	cards := gjson.Get(cont, "data.cards").Array()
+	for _, card := range cards {
+		isTop := gjson.Get(card.String(), "mblog.title").String()
+		if isTop != "" {
+			continue
+		} else {
+			profileId := gjson.Get(card.String(), "profile_type_id").String()
+			msgText := gjson.Get(card.String(), "mblog.text").String()
+			msgPic := gjson.Get(card.String(), "mblog.pics.#.url").Array()
+			scheme := gjson.Get(card.String(), "scheme").String()
+			username := gjson.Get(card.String(), "mblog.user.screen_name").String()
+			createdAt, _ := time.Parse(time.RubyDate, gjson.Get(card.String(), "mblog.created_at").String())
+			return profileId, msgText, msgPic, scheme, username, createdAt.String()
+		}
+	}
+	return "", "", nil, "", "", ""
 }
 
 func getImageByUrl(url string) []byte {
@@ -86,6 +97,7 @@ func getImageByUrl(url string) []byte {
 }
 
 func init() {
+	fmt.Println("weibo插件加载")
 	engine := control.Register("weiboMessage", &ctrl.Options[*zero.Ctx]{
 		DisableOnDefault: false,
 		Help:             "--help weibo Message",
@@ -142,17 +154,17 @@ func delChannels(arg string, ctx *zero.Ctx) {
 }
 func running(ctxCel context.Context, ctx *zero.Ctx) {
 	for {
-		ticker := time.NewTicker(10 * time.Second)
+		ticker := time.NewTicker(60 * time.Second)
 		select {
 		case <-ticker.C:
 			for _, item := range channelItemData {
 				cUrl := item.ContUri
-				pId, mText, mPic, scheme, username := getWeiboMessageBox(cUrl)
+				pId, mText, mPic, scheme, username, creatAt := getWeiboMessageBox(cUrl)
 				_, ok := cacheMap.Get(pId)
 				if ok == false {
 					cacheMap.Set(pId, true, cache.NoExpiration)
 					ctx.Send(message.Message{
-						message.Text(time.Now().Format("2006-01-02 15:04:05") + "\n" + username + "发布了微博:\n" + TrimHtml(mText) + "\n\nURL:" + scheme),
+						message.Text(creatAt + "\n" + username + "发布了微博:\n" + TrimHtml(mText) + "\n\nURL:" + scheme),
 					})
 					for _, picUrl := range mPic {
 						ctx.Send(message.Message{
