@@ -1,9 +1,11 @@
 package weibo
 
 import (
+	"context"
 	"fmt"
 	ctrl "github.com/FloatTech/zbpctrl"
 	"github.com/FloatTech/zbputils/control"
+	"github.com/patrickmn/go-cache"
 	"github.com/tidwall/gjson"
 	zero "github.com/wdvxdr1123/ZeroBot"
 	"github.com/wdvxdr1123/ZeroBot/message"
@@ -25,6 +27,9 @@ var (
 	contApi         = "https://m.weibo.cn/api/container/getIndex?containerid=107603"
 	channelItemData []*channelItem
 )
+
+var ctxCel, cancel = context.WithCancel(context.Background())
+var cacheMap = cache.New(5*time.Minute, 720*time.Hour)
 
 func TrimHtml(src string) string {
 	//将HTML标签全转换成小写
@@ -61,12 +66,14 @@ func getRequest(url string) string {
 	return string(result)
 }
 
-func getWeiboMessageBox(url string) (string, string, []gjson.Result) {
+func getWeiboMessageBox(url string) (string, string, []gjson.Result, string, string) {
 	cont := getRequest(url)
 	profileId := gjson.Get(cont, "data.cards.0.profile_type_id").String()
 	msgText := gjson.Get(cont, "data.cards.0.mblog.text").String()
 	msgPic := gjson.Get(cont, "data.cards.0.mblog.pics.#.url").Array()
-	return profileId, msgText, msgPic
+	scheme := gjson.Get(cont, "data.cards.0.scheme").String()
+	username := gjson.Get(cont, "data.cards.0.mblog.user.screen_name").String()
+	return profileId, msgText, msgPic, scheme, username
 }
 
 func getImageByUrl(url string) []byte {
@@ -83,72 +90,88 @@ func init() {
 		DisableOnDefault: false,
 		Help:             "--help weibo Message",
 	})
+	engine.OnFullMatch("开启订阅").SetBlock(true).Handle(func(ctx *zero.Ctx) {
+		running(ctxCel, ctx)
+	})
+	engine.OnFullMatch("关闭订阅").SetBlock(true).Handle(func(ctx *zero.Ctx) {
+		stop(ctx)
+	})
 	engine.OnPrefix("订阅").SetBlock(true).Handle(func(ctx *zero.Ctx) {
 		args := ctx.State["args"].(string)
-		ch := getChannels(args)
-		for _, item := range ch {
-			linkMsg := getWeiboLink(item.TestUrl)
-			ctx.Send(message.Message{
-				message.Text(linkMsg),
-			})
-		}
-		ticker := time.NewTicker(60 * time.Second)
-		for range ticker.C {
-			var tmpId string
-			for _, item := range ch {
-				profileId, msgText, msgPic := getWeiboMessageBox(item.ContUri)
-				if tmpId != profileId {
-					ctx.Send(message.Message{
-						message.Text(":\n" + TrimHtml(msgText)),
-					})
-					for _, picUrl := range msgPic {
-						ctx.Send(message.Message{
-							message.ImageBytes(getImageByUrl(picUrl.String())),
-						})
-					}
-					tmpId = profileId
-				}
+		getChannels(args)
+		for _, item := range channelItemData {
+			if item.ChannelKey == args {
+				getWeiboLink(item.TestUrl, ctx)
 			}
 		}
 	})
+	engine.OnPrefix("取消订阅").SetBlock(true).Handle(func(ctx *zero.Ctx) {
+		arg := ctx.State["args"].(string)
+		delChannels(arg, ctx)
+	})
+
 }
 
-func getWeiboLink(url string) string {
+func getWeiboLink(url string, ctx *zero.Ctx) {
 	conn := getRequest(url)
 	value := gjson.Get(conn, "data.userInfo.screen_name")
-	return "已经成功订阅  :" + value.String()
+	ctx.Send(message.Message{
+		message.Text("已经成功订阅  :" + value.String()),
+	})
 }
-
-func getChannels(args ...string) []*channelItem {
+func getChannels(args ...string) {
 	for _, item := range args {
 		channelItemData = append(channelItemData, &channelItem{
 			ChannelKey: item,
 			TestUrl:    testApi + item,
 			ContUri:    contApi + item,
 		})
+		fmt.Println("Get channels...", item)
 	}
-	return channelItemData
+	return
 }
-
-func delChannels(arg string) []*channelItem {
-	r := channelItemData
-	for i, item := range r {
+func delChannels(arg string, ctx *zero.Ctx) {
+	for i, item := range channelItemData {
 		if item.ChannelKey == arg {
-			r = append(r[:i], r[i+1:]...)
+			channelItemData = append(channelItemData[:i], channelItemData[i+1:]...)
 		}
 	}
-	return r
+	ctx.Send(message.Message{
+		message.Text("取消订阅", arg),
+	})
 }
-
-func running() {
-	r := channelItemData
-	ticker := time.NewTicker(60 * time.Second)
-	for range ticker.C {
-		for _, item := range r {
-			linkMsg := getWeiboLink(item.TestUrl)
-			fmt.Println(linkMsg)
+func running(ctxCel context.Context, ctx *zero.Ctx) {
+	for {
+		ticker := time.NewTicker(10 * time.Second)
+		select {
+		case <-ticker.C:
+			for _, item := range channelItemData {
+				cUrl := item.ContUri
+				pId, mText, mPic, scheme, username := getWeiboMessageBox(cUrl)
+				_, ok := cacheMap.Get(pId)
+				if ok == false {
+					cacheMap.Set(pId, true, cache.NoExpiration)
+					ctx.Send(message.Message{
+						message.Text(time.Now().Format("2006-01-02 15:04:05") + "\n" + username + "发布了微博:\n" + TrimHtml(mText) + "\n\nURL:" + scheme),
+					})
+					for _, picUrl := range mPic {
+						ctx.Send(message.Message{
+							message.ImageBytes(getImageByUrl(picUrl.String())),
+						})
+					}
+				} else {
+					fmt.Println("命中缓存了，没有发布新的微博")
+				}
+			}
+		case <-ctxCel.Done():
+			break
 		}
 	}
 }
-
-// Send 快捷发送
+func stop(ctx *zero.Ctx) {
+	ctx.Send(message.Message{
+		message.Text("关闭订阅成功"),
+	})
+	cacheMap.Flush()
+	cancel()
+}
