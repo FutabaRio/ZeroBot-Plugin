@@ -195,6 +195,8 @@ func (w *wbFunc) stop(ctx *zero.Ctx) {
 		ctx.Send(message.Message{
 			message.Text("关闭订阅成功！停止开始接收消息"),
 		})
+		// 清空订阅消息 清空缓存
+		channelItemData = nil
 		cacheMap.Flush()
 	} else {
 		ctx.Send(message.Message{
